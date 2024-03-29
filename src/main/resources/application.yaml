@@ -1,0 +1,45 @@
+server:
+  port: 8081
+spring:
+  application:
+    name: dzdp
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/dzdp?useSSL=false&serverTimezone=UTC
+    username: root
+    password: "123456"
+  redis:
+    host: 192.168.240.201
+    port: 6379
+    lettuce:
+      pool:
+        max-active: 10
+        max-idle: 10
+        min-idle: 1
+        time-between-eviction-runs: 10s
+  jackson:
+    default-property-inclusion: non_null # JSON处理时忽略非空字段
+  mail:
+    host: stmp.qq.com
+    username: 2498298782@qq.com
+    password: hkxjeqondwhbeagj
+    properties:
+      mail:
+        smtp:
+          ssl:
+            enable: true
+    default-encoding: utf-8
+mybatis-plus:
+  type-aliases-package: com.dzdp.entity # 别名扫描包
+  configuration:
+    map-underscore-to-camel-case: true
+logging:
+  level:
+    com.dzdp: debug
+rocketmq:
+  name-server: 127.0.0.1:9876 # 访问地址
+  producer:
+    group: Pro_Group # 必须指定group
+    send-message-timeout: 3000 # 消息发送超时时长，默认3s
+    retry-times-when-send-failed: 3 # 同步发送消息失败重试次数，默认2
+    retry-times-when-send-async-failed: 3 # 异步发送消息失败重试次数，默认2
