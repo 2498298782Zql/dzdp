@@ -20,7 +20,7 @@ spring:
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
   mail:
-    host: stmp.qq.com
+    host: smtp.qq.com
     username: 2498298782@qq.com
     password: hkxjeqondwhbeagj
     properties:

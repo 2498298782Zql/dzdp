@@ -16,6 +16,7 @@ import com.dzdp.utils.RegexUtils;
 import com.dzdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.mail.SimpleMailMessage;
@@ -36,40 +37,56 @@ import static com.dzdp.utils.RedisConstants.*;
 import static com.dzdp.utils.SystemConstants.*;
 
 
-
 @Service
 @Slf4j
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    @Resource
+    @Autowired
     private JavaMailSender mailSender;
 
+    @Value("${spring.mail.username}")
+    private String emailFrom;
 
-    public Result sendMailCode(String email){
+    @Override
+    public Result sendMailCode(String email) {
+        if (RegexUtils.isEmailInvalid(email)) {
+            //手机号不符合
+            return Result.fail("邮箱格式错误");
+        }
+
+        // 60s内只可以发一次
+        Boolean keyIsExist = stringRedisTemplate.hasKey(LOGIN_MAIL_KEY + email);
+        if (keyIsExist) {
+            Long expireTime = stringRedisTemplate.getExpire(LOGIN_MAIL_KEY + email);
+            return Result.fail("请" + expireTime + "秒后重试");
+        }
+
+
+        //判断是否在限制条件内
+        Boolean oneLevelLimit = stringRedisTemplate.opsForSet().isMember(ONE_LEVER_LIMIT_KEY + email, "1");
+        if (oneLevelLimit != null && oneLevelLimit) {
+            return Result.fail("5分钟内您已经发送了多次，请稍后重试");
+        }
+
+        long fiveMinutesAgo = System.currentTimeMillis() - 5 * 60 * 1000;
+        long count_fiveMinute = stringRedisTemplate.opsForZSet().count(SET_COUNT + email, fiveMinutesAgo, System.currentTimeMillis());
+        if (count_fiveMinute > 4) {
+            stringRedisTemplate.opsForSet().add(ONE_LEVER_LIMIT_KEY + email, "1");
+            stringRedisTemplate.expire(ONE_LEVER_LIMIT_KEY + email, 5, TimeUnit.MINUTES);
+            Result.fail("5分钟内您已经发送了多次，请稍后重试");
+        }
         SimpleMailMessage mailMessage = new SimpleMailMessage();
         mailMessage.setSubject("验证码邮件");
         String code = RandomUtil.randomNumbers(6);
-    }
-
-
-    @Override
-    public Result sendCode(String phone, HttpSession session) {
-        //校验手机号
-        if (RegexUtils.isPhoneInvalid(phone)) {
-            //手机号不符合
-            return Result.fail("手机号格式错误");
-        }
-        //手机号符合,生成验证码
-        String code = RandomUtil.randomNumbers(6);
-        /*//保存验证码到session
-        session.setAttribute("code", code);*/
-        //保存验证码到redis
-        stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL, TimeUnit.MINUTES);
-        //发送验证码
-        log.debug("发送验证码成功，验证码：{}", code);
-        //返回ok
+        stringRedisTemplate.opsForValue().set(LOGIN_MAIL_KEY + email, code, LOGIN_CODE_TTL, TimeUnit.MINUTES);
+        log.info("发送登录验证码：{}", code);
+        mailMessage.setText("您收到的验证码是: " + code);
+        mailMessage.setTo(email);
+        mailMessage.setFrom(emailFrom);
+        mailSender.send(mailMessage);
+        stringRedisTemplate.opsForZSet().add(SET_COUNT + email, System.currentTimeMillis() + "", System.currentTimeMillis());
         return Result.ok();
     }
 
@@ -77,13 +94,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     public Result login(LoginFormDTO loginForm, HttpSession session) {
         //校验手机号
         String phone = loginForm.getPhone();
-        if (RegexUtils.isPhoneInvalid(phone)) {
+        if (RegexUtils.isEmailInvalid(phone)) {
             //手机号不符合
-            return Result.fail("手机号格式错误");
+            return Result.fail("邮箱格式错误");
         }
-        //从redis中获取验证码 校验验证码
-        /*  Object cacheCode = session.getAttribute("code");*/
-        String cacheCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
+        String cacheCode = stringRedisTemplate.opsForValue().get(LOGIN_MAIL_KEY + phone);
         String code = loginForm.getCode();
         if (cacheCode == null || !cacheCode.equals(code)) {
             //不一致 报错
@@ -112,6 +127,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY + token, map);
         //设置过期时间
         stringRedisTemplate.expire(LOGIN_USER_KEY + token, LOGIN_USER_TTL, TimeUnit.MINUTES);
+        stringRedisTemplate.delete(LOGIN_MAIL_KEY + phone);
         return Result.ok(token);
     }
 
@@ -123,11 +139,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         LocalDateTime now = LocalDateTime.now();
         //拼接key
         String yyyyMM = now.format(DateTimeFormatter.ofPattern("yyyy:MM:"));
-        String key = USER_SIGN_KEY +yyyyMM+ id;
+        String key = USER_SIGN_KEY + yyyyMM + id;
         //获取今天是本月的第几天
         int dayOfMonth = now.getDayOfMonth();
         //写了redis
-        stringRedisTemplate.opsForValue().setBit(key,dayOfMonth-1,true);
+        stringRedisTemplate.opsForValue().setBit(key, dayOfMonth - 1, true);
         return Result.ok();
     }
 
@@ -139,7 +155,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         LocalDateTime now = LocalDateTime.now();
         //拼接key
         String yyyyMM = now.format(DateTimeFormatter.ofPattern("yyyy:MM:"));
-        String key = USER_SIGN_KEY +yyyyMM+ id;
+        String key = USER_SIGN_KEY + yyyyMM + id;
         //获取今天是本月的第几天
         int dayOfMonth = now.getDayOfMonth();
         //获取截至本月今天的所有签到记录
@@ -150,22 +166,21 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                                 .unsigned(dayOfMonth))
                         .valueAt(0)
         );
-        if (result==null||result.isEmpty()){
+        if (result == null || result.isEmpty()) {
             return Result.ok(0);
         }
         Long num = result.get(0);
-        if (num==null||num==0){
+        if (num == null || num == 0) {
             return Result.ok(0);
         }
         //转二进制字符串
         String binaryString = Long.toBinaryString(num);
         //计算连续签到天数
-        int count=0;
-        for (int i = binaryString.length()-1; i >=0; i--) {
-            if (binaryString.charAt(i)=='1'){
+        int count = 0;
+        for (int i = binaryString.length() - 1; i >= 0; i--) {
+            if (binaryString.charAt(i) == '1') {
                 count++;
-            }
-            else {
+            } else {
                 break;
             }
         }

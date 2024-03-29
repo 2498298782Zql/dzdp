@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 @Slf4j
@@ -52,6 +53,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     RocketMQTemplate rocketMQTemplate;
 
+
+    // 上一次令牌发放时间
+    public long lastTime = System.currentTimeMillis();
+    // 桶的容量
+    public int capacity = 10;
+    // 令牌生成速度 /s
+    public int rate = 4;
+    // 当前令牌数量
+    public AtomicInteger tokens = new AtomicInteger(0);
+
     /**
      * 自己注入自己为了获取代理对象 @Lazy 延迟注入 避免形成循环依赖
      */
@@ -62,7 +73,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     //    private static final BlockingQueue<VoucherOrder> orderTasks=new ArrayBlockingQueue<>(1024*1024);
     private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
 
-    @PostConstruct
+    /*@PostConstruct
     private void init() {
         SECKILL_ORDER_EXECUTOR.submit(() -> {
             String queueName="stream.orders";
@@ -93,7 +104,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 }
             }
         });
-    }
+    }*/
 
     /**
      * 引入mq
@@ -359,5 +370,46 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                         .setSql("stock=stock-1"));
         //创建订单
         this.save(voucherOrder);
+    }
+
+// -----------------------------------------------------------------------------------------------------------------
+    //令牌桶算法基本逻辑
+    //返回值说明：
+    // false 没有被限制到
+    // true 被限流
+    public synchronized boolean isLimited(long taskId, int applyCount) {
+        long now = System.currentTimeMillis();
+        //时间间隔,单位为 ms
+        long gap = now - lastTime;
+
+        //计算时间段内的令牌数
+        int reverse_permits = (int) (gap * rate / 1000);
+        int all_permits = tokens.get() + reverse_permits;
+        // 当前令牌数
+        tokens.set(Math.min(capacity, all_permits));
+
+        if (tokens.get() < applyCount) {
+            return true;
+        } else {
+            // 还有令牌，领取令牌
+            tokens.getAndAdd(-applyCount);
+            lastTime = now;
+            return false;
+        }
+    }
+
+
+    public boolean isLimitedWithTimeout(long taskId, int applyCount, long timeout, TimeUnit unit) throws InterruptedException {
+        long startTime = System.currentTimeMillis();
+        long timeoutInMillis = unit.toMillis(timeout);
+        while (System.currentTimeMillis() - startTime < timeoutInMillis) {
+            if (!isLimited(taskId, applyCount)) {
+                return false; // 成功获取到令牌
+            }
+            // 等待一段时间后重试
+            Thread.sleep(50);
+        }
+
+        return true; // 超时未获取到令牌
     }
 }

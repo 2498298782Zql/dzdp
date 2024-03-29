@@ -27,6 +27,9 @@ public class VoucherController {
         return Result.ok(voucher.getId());
     }
 
+
+
+
      /*生成秒杀券，当前时间需要在开始时间和结束时间之中，否则前端不会展示
     {
         "shopId": 1,
