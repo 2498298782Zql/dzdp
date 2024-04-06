@@ -53,7 +53,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     RocketMQTemplate rocketMQTemplate;
 
+    // 令牌桶算法方法一：引用别人定义好的sdk组件
+//    private RateLimiter rateLimiter=RateLimiter.create(10);
 
+// 令牌桶算法方法二: 自定义算法
     // 上一次令牌发放时间
     public long lastTime = System.currentTimeMillis();
     // 桶的容量
@@ -69,42 +72,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     @Lazy
     private IVoucherOrderService voucherOrderService;
-    private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
-    //    private static final BlockingQueue<VoucherOrder> orderTasks=new ArrayBlockingQueue<>(1024*1024);
-    private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
 
-    /*@PostConstruct
-    private void init() {
-        SECKILL_ORDER_EXECUTOR.submit(() -> {
-            String queueName="stream.orders";
-            while (true) {
-                try {
-                    //从消息队列中获取订单信息
-                    List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
-                            Consumer.from("g1", "c1")
-                            , StreamReadOptions.empty().count(1).block(Duration.ofSeconds(2))
-                            , StreamOffset.create(queueName, ReadOffset.lastConsumed())
-                    );
-                    //判断消息时候获取成功
-                    if (list==null||list.isEmpty()){
-                        //获取失败 没有消息 继续循环
-                        continue;
-                    }
-                    //获取成功 解析消息
-                    MapRecord<String, Object, Object> record = list.get(0);
-                    Map<Object, Object> values = record.getValue();
-                    VoucherOrder voucherOrder = BeanUtil.fillBeanWithMap(values, new VoucherOrder(), true);
-                    //下单
-                    handleVoucherOrder(voucherOrder);
-                    //ack确认消息
-                    stringRedisTemplate.opsForStream().acknowledge(queueName,"g1",record.getId());
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    handlePendingList();
-                }
-            }
-        });
-    }*/
+    private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
     /**
      * 引入mq
@@ -113,6 +82,21 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      */
     @Override
     public Result seckillVoucher(Long voucherId) {
+        //令牌桶算法 限流
+        //法一：
+        /*if (!rateLimiter.tryAcquire(1000, TimeUnit.MILLISECONDS)){
+            return Result.fail("目前网络正忙，请重试");
+        }*/
+        //法二：
+        boolean isLimited = false;
+        try {
+            isLimited = isLimitedWithTimeout(1, 1000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            log.info("获取令牌发生意外:"+ e);
+        }
+        if(isLimited){
+           return Result.fail("目前网络正忙，请重试");
+        }
         //获取用户
         UserDTO user = UserHolder.getUser();
         //获取订单id
@@ -130,13 +114,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             //不为0 没有购买资格
             return Result.fail(r == 1 ? "库存不足" : "禁止重复下单");
         }
-
         // 插入订单业务
         VoucherOrder voucherOrder = new VoucherOrder();
         voucherOrder.setId(orderId);
         voucherOrder.setUserId(user.getId());
         voucherOrder.setVoucherId(voucherId);
-
         rocketMQTemplate.asyncSend(MQConstants.secKillTopic.getValue() + ":voucherOrder", MessageBuilder.withPayload(voucherOrder), new SendCallback() {
             @Override
             public void onSuccess(SendResult sendResult) {
@@ -147,7 +129,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 log.info(Thread.currentThread().getId() + ":" + voucherOrder.getUserId() + ":消息投递失败");
             }
         });
-
         return Result.ok(orderId);
     }
 
@@ -377,7 +358,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     //返回值说明：
     // false 没有被限制到
     // true 被限流
-    public synchronized boolean isLimited(long taskId, int applyCount) {
+    public synchronized boolean isLimited(int applyCount) {
         long now = System.currentTimeMillis();
         //时间间隔,单位为 ms
         long gap = now - lastTime;
@@ -399,11 +380,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
 
-    public boolean isLimitedWithTimeout(long taskId, int applyCount, long timeout, TimeUnit unit) throws InterruptedException {
+    /**
+     * @param applyCount 申请的数量
+     * @param timeout 超时时间
+     * @param unit 时间单位
+     * @return true为未获取令牌，false为成功获取到令牌
+     * @throws InterruptedException
+     */
+    public boolean isLimitedWithTimeout(int applyCount, long timeout, TimeUnit unit) throws InterruptedException {
         long startTime = System.currentTimeMillis();
         long timeoutInMillis = unit.toMillis(timeout);
         while (System.currentTimeMillis() - startTime < timeoutInMillis) {
-            if (!isLimited(taskId, applyCount)) {
+            if (!isLimited(applyCount)) {
                 return false; // 成功获取到令牌
             }
             // 等待一段时间后重试

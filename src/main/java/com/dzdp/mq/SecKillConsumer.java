@@ -31,13 +31,9 @@ public class SecKillConsumer extends ServiceImpl<VoucherOrderMapper,VoucherOrder
                 log.info("消费订单:"+voucherOrder.getId());
                 save(voucherOrder);
             }else{
-                log.info(Thread.currentThread().getName()+"消费失败，订单id为:"+voucherOrder.getId());
+                log.error(Thread.currentThread().getName()+"消费失败，订单id为:"+voucherOrder.getId());
                 throw new RuntimeException();
             }
-
-
         }
     }
-
-
 }
